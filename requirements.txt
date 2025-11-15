@@ -1,0 +1,8 @@
+streamlit
+streamlit-webrtc
+opencv-python-headless
+mediapipe
+numpy
+Pillow
+google-generativeai
+requests
