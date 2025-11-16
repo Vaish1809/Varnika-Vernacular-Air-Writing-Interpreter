@@ -1,4 +1,3 @@
-# streamlit_app.py
 import os
 import time
 import json
@@ -6,7 +5,6 @@ import threading
 from collections import deque, defaultdict
 from datetime import datetime
 
-import cv2
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
@@ -14,24 +12,18 @@ from PIL import Image, ImageFont, ImageDraw
 import google.generativeai as genai
 import requests
 import urllib.parse
-
 import mediapipe as mp
-
-RTC_CONFIGURATION = {
-    "iceServers": [
-        # Public Google STUN server (free)
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        # OPTIONAL: TURN server (needed if many users are behind strict firewalls)
-        # {
-        #     "urls": ["turn:your.turn.server:3478"],
-        #     "username": st.secrets["TURN_USERNAME"],
-        #     "credential": st.secrets["TURN_PASSWORD"],
-        # },
-    ]
-}
 
 LETTERS_FOLDER = "letters"
 TRIGRAM_FILE = "trigram_dict.json"
+
+# ---------- WebRTC ICE config ----------
+RTC_CONFIGURATION = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        # If you configure TURN, add it here using st.secrets["TURN_USERNAME"], etc.
+    ]
+}
 
 # ---------- FONT LOADING ----------
 def load_hindi_font():
@@ -87,7 +79,7 @@ with open(TRIGRAM_FILE, "r", encoding="utf-8") as f:
 
 def generate_trigrams(word):
     padded = f"#{word}#"
-    return [padded[i:i+3] for i in range(len(padded)-2)]
+    return [padded[i:i+3] for i in range(len(padded) - 2)]
 
 def suggest_words(input_text, trigram_dict, top_n=3):
     input_trigrams = set(generate_trigrams(input_text))
@@ -115,12 +107,16 @@ def get_gemini_model():
         st.error(f"Error initializing Gemini: {e}")
         return None
 
-def extract_hindi_with_gemini(image_bgr):
+def extract_hindi_with_gemini(image_bgr: np.ndarray):
+    """
+    image_bgr: uint8 numpy array (H, W, 3) in BGR format.
+    """
     model = get_gemini_model()
     if model is None:
         return "Model not initialized", []
 
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    # BGR -> RGB without cv2
+    image_rgb = image_bgr[:, :, ::-1]
     pil_image = Image.fromarray(image_rgb)
 
     prompt = (
@@ -164,7 +160,8 @@ def extract_hindi_with_gemini(image_bgr):
     except Exception as e:
         return f"Error: {e}", []
 
-def translate_text(text):
+def translate_text(text: str) -> str:
+    # 1) Try Google Translate free endpoint
     try:
         encoded = urllib.parse.quote(text)
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=hi&tl=en&dt=t&q={encoded}"
@@ -175,7 +172,7 @@ def translate_text(text):
     except Exception as e:
         print("Google translate failed:", e)
 
-    # Fallback Gemini
+    # 2) Fallback Gemini
     model = get_gemini_model()
     if model:
         try:
@@ -195,6 +192,36 @@ def translate_text(text):
 
     return "No translation available"
 
+# ---------- SIMPLE LINE DRAWING WITHOUT OPENCV ----------
+def draw_thick_line(img: np.ndarray, start, end, color, thickness: int):
+    """
+    Draw a simple thick line on img (H,W,3) using numpy only.
+    start, end: (x, y)
+    color: (B, G, R) or (R, G, B) – just be consistent.
+    """
+    if start is None or end is None:
+        return
+
+    x0, y0 = start
+    x1, y1 = end
+    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+
+    num = max(abs(x1 - x0), abs(y1 - y0)) + 1
+    xs = np.linspace(x0, x1, num).astype(int)
+    ys = np.linspace(y0, y1, num).astype(int)
+
+    h, w, _ = img.shape
+    r = max(1, thickness // 2)
+
+    for x, y in zip(xs, ys):
+        if x < 0 or x >= w or y < 0 or y >= h:
+            continue
+        x_min = max(0, x - r)
+        x_max = min(w, x + r)
+        y_min = max(0, y - r)
+        y_max = min(h, y + r)
+        img[y_min:y_max, x_min:x_max] = color
+
 # ---------- VIDEO PROCESSOR ----------
 class HandwritingProcessor(VideoTransformerBase):
     def __init__(self):
@@ -203,6 +230,7 @@ class HandwritingProcessor(VideoTransformerBase):
             min_detection_confidence=0.7, min_tracking_confidence=0.7
         )
 
+        # 480x640 is enough and lighter than 720p
         self.camera_screen = np.zeros((480, 640, 3), dtype=np.uint8)
         self.blackboard = np.zeros((480, 640, 3), dtype=np.uint8)
         self.drawing = False
@@ -223,19 +251,16 @@ class HandwritingProcessor(VideoTransformerBase):
         self.smooth_points.append(p)
         if len(self.smooth_points) < 3:
             return p
-        x = int(sum(pt[0] for pt in self.smooth_points)/len(self.smooth_points))
-        y = int(sum(pt[1] for pt in self.smooth_points)/len(self.smooth_points))
+        x = int(sum(pt[0] for pt in self.smooth_points) / len(self.smooth_points))
+        y = int(sum(pt[1] for pt in self.smooth_points) / len(self.smooth_points))
         return (x, y)
 
-    def draw_line(self, img, start_point, end_point, color, thickness):
-        if start_point is not None and end_point is not None:
-            cv2.line(img, start_point, end_point, color, thickness)
-
-    def process_capture(self, blackboard_image):
-        # save & call Gemini in background
+    def process_capture(self, blackboard_image: np.ndarray):
+        # Save using PIL (no cv2)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = os.path.join(LETTERS_FOLDER, f"letter_{ts}.png")
-        cv2.imwrite(filename, blackboard_image)
+        img_rgb = blackboard_image[:, :, ::-1]  # BGR -> RGB for PIL
+        Image.fromarray(img_rgb).save(filename)
         print("Saved letter:", filename)
 
         hindi_text, suggestions = extract_hindi_with_gemini(blackboard_image)
@@ -244,21 +269,36 @@ class HandwritingProcessor(VideoTransformerBase):
         self.is_processing = False
 
     def recv(self, frame):
+        # Get frame in BGR (as ndarray)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)  # mirror
 
-        frame_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Flip horizontally (mirror)
+        img = img[:, ::-1, :]
+
+        # Resize to 480x640 region we use (simple center crop/resize if needed)
+        h, w, _ = img.shape
+        target_h, target_w = self.camera_screen.shape[:2]
+
+        # Simple resize with numpy (nearest-neighbor) to avoid cv2.resize
+        # Compute scale factors
+        scale_y = h / target_h
+        scale_x = w / target_w
+        ys = (np.arange(target_h) * scale_y).astype(int)
+        xs = (np.arange(target_w) * scale_x).astype(int)
+        img_resized = img[ys][:, xs]
+
+        frame_rgb = img_resized[:, :, ::-1]  # BGR -> RGB for mediapipe
         results = self.hands.process(frame_rgb)
 
-        display_frame = img.copy()
+        display_frame = img_resized.copy()
         fingers_up = 0
         index_x = index_y = None
 
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
-                index_x = int(index_tip.x * img.shape[1])
-                index_y = int(index_tip.y * img.shape[0])
+                index_x = int(index_tip.x * target_w)
+                index_y = int(index_tip.y * target_h)
 
                 fingers_up = 0
                 if index_tip.y < hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_PIP].y:
@@ -275,9 +315,9 @@ class HandwritingProcessor(VideoTransformerBase):
                     smooth_pos = self.get_smooth_point((index_x, index_y))
 
                     if self.last_position:
-                        self.draw_line(self.camera_screen, self.last_position, smooth_pos, (0, 0, 255), 10)
-                        self.draw_line(self.blackboard, self.last_position, smooth_pos, (255, 255, 255), 10)
-                        self.draw_line(display_frame, self.last_position, smooth_pos, (0, 0, 255), 10)
+                        draw_thick_line(self.camera_screen, self.last_position, smooth_pos, (0, 0, 255), 10)
+                        draw_thick_line(self.blackboard, self.last_position, smooth_pos, (255, 255, 255), 10)
+                        draw_thick_line(display_frame, self.last_position, smooth_pos, (0, 0, 255), 10)
                     self.last_position = smooth_pos
                     self.two_fingers_previous = False
 
@@ -305,25 +345,17 @@ class HandwritingProcessor(VideoTransformerBase):
                     self.two_fingers_previous = False
                     self.predicted_character = ""
                     self.suggestions = []
-                    cv2.putText(display_frame, "CLEARED!", (150, 200),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
 
         else:
             self.two_fingers_previous = False
 
-        cv2.putText(display_frame, f"Fingers: {fingers_up}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        cv2.putText(display_frame, "1: Write | 2: Capture | 4: Clear", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        # blend drawing
-        mask = cv2.cvtColor(self.camera_screen, cv2.COLOR_BGR2GRAY)
-        _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
-        display_frame[mask > 0] = (0, 0, 255)
+        # Overlay drawing: wherever camera_screen has non-zero pixels, paint red on display_frame
+        mask = np.any(self.camera_screen != 0, axis=2)
+        display_frame[mask] = (0, 0, 255)
 
         return display_frame
 
-# ---------- STREAMLIT LAYOUT ----------
+# ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="Realtime Hindi Air-Writing", layout="wide")
 st.title("✋✍️ Realtime Hindi Handwriting (Air-Writing)")
 
@@ -332,7 +364,7 @@ col_video, col_text = st.columns([2, 1])
 with col_video:
     webrtc_ctx = webrtc_streamer(
         key="hindi-live",
-        mode="SENDRECV",  # ensure two-way stream
+        mode="SENDRECV",
         video_transformer_factory=HandwritingProcessor,
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration=RTC_CONFIGURATION,
@@ -345,7 +377,6 @@ with col_video:
             "style": {"width": "100%", "height": "auto"},
         },
     )
-
 
 with col_text:
     st.subheader("Recognition & Translation")
