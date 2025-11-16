@@ -17,6 +17,19 @@ import urllib.parse
 
 import mediapipe as mp
 
+RTC_CONFIGURATION = {
+    "iceServers": [
+        # Public Google STUN server (free)
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        # OPTIONAL: TURN server (needed if many users are behind strict firewalls)
+        # {
+        #     "urls": ["turn:your.turn.server:3478"],
+        #     "username": st.secrets["TURN_USERNAME"],
+        #     "credential": st.secrets["TURN_PASSWORD"],
+        # },
+    ]
+}
+
 LETTERS_FOLDER = "letters"
 TRIGRAM_FILE = "trigram_dict.json"
 
@@ -319,10 +332,20 @@ col_video, col_text = st.columns([2, 1])
 with col_video:
     webrtc_ctx = webrtc_streamer(
         key="hindi-live",
+        mode="SENDRECV",  # ensure two-way stream
         video_transformer_factory=HandwritingProcessor,
         media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration=RTC_CONFIGURATION,
         async_transform=True,
+        video_html_attrs={
+            "autoPlay": True,
+            "controls": False,
+            "muted": True,
+            "playsInline": True,
+            "style": {"width": "100%", "height": "auto"},
+        },
     )
+
 
 with col_text:
     st.subheader("Recognition & Translation")
