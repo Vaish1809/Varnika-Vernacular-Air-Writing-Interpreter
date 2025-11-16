@@ -7,7 +7,7 @@ from datetime import datetime
 
 import numpy as np
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 from PIL import Image, ImageFont, ImageDraw
 import google.generativeai as genai
 import requests
@@ -364,11 +364,11 @@ col_video, col_text = st.columns([2, 1])
 with col_video:
     webrtc_ctx = webrtc_streamer(
         key="hindi-live",
-        mode="SENDRECV",
-        video_transformer_factory=HandwritingProcessor,
+        mode=WebRtcMode.SENDRECV,          # <- use enum, not string
+        video_processor_factory=HandwritingProcessor,  # <- new API name
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration=RTC_CONFIGURATION,
-        async_transform=True,
+        async_processing=True,             # <- replaces async_transform
         video_html_attrs={
             "autoPlay": True,
             "controls": False,
